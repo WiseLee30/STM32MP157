@@ -478,6 +478,8 @@ MODULE_INFO(intree, "Y");
 3. 设置GPIO复用功能，`GPIOI_MODER`寄存器
 4. 设置GPIO速度、上下拉、模式，`GPIOI_OTYPER`、 `GPIOI_OSPEEDR`和`GPIOI_PUPDR`等寄存器
 ### 3、pinctrl和gpio子系统
+- pinctrl子系统是设置PIN的复用和电器属性，将PIN复用位GPIO；gpio子系统是初始化GPIO并提供相应的PGIO函数
+- 二者驱动文件相同，都是`pinctrl-stm32mp157.c`，pinctrl驱动会顺便把gpio驱动一起注册，入口函数都是`stm32_pctl_probe`
 #### pinctrl子系统
 1. 主要工作内容
    1. 获取设备树中 pin 信息
@@ -487,10 +489,71 @@ MODULE_INFO(intree, "Y");
     `stm32mp15-pinctrl.dtsi`中的`pinctrl子节点`
     1. `pinmux属性`:存放外设所要使用的所有IO，使用`STM32_PINMUX`配置GPIO组、该组第几个引脚、复用模式
     2. 电器属性配置(非必须)
+3. 驱动流程
+    1. 定义 pinctrl_desc 结构体
+    2. 初始化结构体， 重点是 pinconf_ops、 pinmux_ops 和 pinctrl_ops 这三个结构体成员变量
+    3. 调用 devm_pinctrl_register 函数完成 PIN 控制器注册
+4. 实例
+在pinctrl节点下添加一个“uart4_pins”节点
+```C
+pinctrl {
+    uart4_pins: uart4-0 {//添加节点
+        pins1{//添加pins属性
+            pinmux = <STM32_PINMUX('G', 11, AF6)>; /* UART4_TX */   //具体配置
+            bias-disable;
+            drive-push-pull;
+        };
+    };
+};
+```
 #### gpio子系统
 1. 主要工作
-    用于初始化 GPIO 并且提供相应的 API 函数
-2. 
+    在设备树中添加GPIO相关信息，在驱动程序中使用gpio子系统提供的API函数来操作GPIO
+2. 实例
+在根节点“/”下创建led设备子节点
+```C
+led {
+    compatible = "atk,led";
+    gpio = <&gpioi 0 GPIO_ACTIVE_LOW>;
+    status = "okay";
+};
+```
+3. 驱动程序流程
+    1. 修改设备树，`stm32mp157d-atk.dts`根节点下创建gpioled节点
+        ```C
+        gpioled {
+            compatible = "alientek,led";
+            status = "okay";
+            led-gpio = <&gpioi 0 GPIO_ACTIVE_LOW>;
+        };
+        ```
+    2. 具体驱动编写
+        ```C
+        1. 设备结构体
+        2. 用创建设备
+        3. open
+        4. read
+        5. write
+        6. release
+        7. 操作函数
+        8. 驱动入口
+            /*设置 LED 所使用的 GPIO*/
+            1. 获取设备节点
+            gpioled.nd = of_find_node_by_path("/gpioled");
+            2. 读取status
+            ret = of_property_read_string(gpioled.nd, "status", &str);
+            3. 获取compatible属性并匹配
+            ret = of_property_read_string(gpioled.nd, "compatible", &str);
+            4. 获取设备树中gpio属性，得到LED编号
+            gpioled.led_gpio = of_get_named_gpio(gpioled.nd, "led-gpio", 0);
+            5. 向gpio子系统申请使用 GPIO
+            ret = gpio_request(gpioled.led_gpio, "LED-GPIO");
+            6. 设置输出，高电平，默认关闭
+            ret = gpio_direction_output(gpioled.led_gpio, 1);
+            /*注册字符设备驱动*/
+        9. 驱动出口
+        10. 模块描述
+        ```
 ### 4、并发与竞争
 ### 5、Linux中断
 ### 6、阻塞和非阻塞
