@@ -559,8 +559,65 @@ led {
 ### 6、阻塞和非阻塞
 ### 7、异步通知
 ### 8、platform设备驱动
+#### 设备驱动分离
+**驱动<-->总线<-->设备模型**
+ - 常见总线有I2C、SPI、USB等总线，对于SOC中没有总线的外设，采用platform虚拟总线，相应的有platform_device和platform_driver
+ - platform总线是bus_type的一个具体实例
+ - match函数和用来根据注册的设备/驱动查找相应的驱动/设备
+#### 匹配方式
+ - OF类型匹配(设备树)
+    device_driver结构体有名为of_match_table的成员变量，保存着驱动的compatible匹配表，可以与设备树中每个设备节点的compatible属性进行比较
+ - ACPI匹配
+ - id_table匹配
+ - name字段
+#### 驱动框架
+```C
+1. 设备结构体
+2. 定义设备结构体变量
+3. open
+4. read
+5. write
+6. 字符设备驱动操作集
+7. platform驱动的probe函数
+8. remove
+9. 匹配列表match
+10. 平台驱动结构体
+11. 驱动模块加载
+12. 驱动模块卸载
+13. 模块信息
+```
+#### 设备树下的platform驱动编写
+1. 整体流程
+    驱动设备匹配->根据设备树中pinctrl属性设置电气特性->probe函数->在probe函数中执行字符设备驱动->注销驱动模块时执行remove函数
+2. 修改pinctrl-stm32.c
+    ST针对STM32MP1提供 Linux系统中，其pinctrl 配置的电气属性只能在platform 平台下被引用pinctrl什么时候有效，不同的芯片厂商有不同的处理方法。imx6ull芯片在Linux系统启动运行过程中会自动解析设备树下的pinctrl配置，然后初始化引脚的电器属性，不需要platform驱动框架。
+    对于STM32MP1来说，PI0这个IO已经被其他外设申请走，所以需要修改修改pinctrl-stm32.c，否则当木哦各引脚用作GPIO时会提示该引脚无法申请到
+    修改`stm32_mpx_ops`下的`.srtict`为false
+    完成之后需要重新编译内核
+3. 创建设备的 pinctrl 节点
+    在`stm32mp15-pinctrl.dtsi`文件(TM32MP1 的所有引脚 pinctrl 配置都是在这个文件里面完成)中添加设备节点
+4. 在设备树中创建设备节点
+    在`stm32mp157d-atk.dts` 中添加节点
+5. 注意platform驱动中的兼容属性设置
+    - 兼容表xxx_of_match
+    - 声明设备匹配表
+    - 设置platform_driver中of_match_table
+6. 注意pinctrl配置，检查引脚有没有被复用为多个设备，或者GPIO有没有被占用
 ### 9、Linux I2C
+#### 基本原理
+1. 通信 
+2. 读时序
+3. 写时序
+#### I2C子系统总体框架
+1. 裸机I2C驱动
+    - I2C主机驱动：SoC的I2C控制器对应的驱动程序，一旦编写完成就不需要再做修改，其他I2C设备直接调用主机驱动提供的API函数完成读写操作即可。
+    - I2C设备驱动：挂在I2C总线下的具体设备对应的驱动程序
 ### 10、Linux SPI
+2. Linux
+    使用I2C总线框架，主要分为
+    - I2C核心
+    - I2C总线驱动
+    - I2C设备驱动
 ### 11、Linux UART
 ### 12、Linux CAN
 ### 13、Linux WiFi
