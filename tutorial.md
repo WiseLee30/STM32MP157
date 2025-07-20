@@ -605,19 +605,456 @@ led {
 6. 注意pinctrl配置，检查引脚有没有被复用为多个设备，或者GPIO有没有被占用
 ### 9、Linux I2C
 #### 基本原理
-1. 通信 
-2. 读时序
+1. 简介
+    数据线：SCL(串行时钟线)和SDA(串行数据线)，接上拉电阻，空闲时处于高电平。
+    标准模式下100Kb/S，快速模式下400Kb/S
+    支持多个从机
+2. 通信
+    - 起始位：当SCL为高电平时，SDA出现下降沿表示为起始位
+    - 停止位：当SCL为高电平时，SDA出现下降沿表示为停止位
+    - 数据传输：进行时，保证SCL为高电平时，数据稳定；数据变化只发生在SCL为低电平时
+    - 应答信号：I2C主机发送完8位数据后，将SDA设置为**输入状态**，等待I2C主机应达。**应到信号**由从机发出，主机提供应答信号所需的时钟，主机发完八位数据后紧跟着**一个时钟信号**就是给应答信号使用。从机通过**拉低SDA表示通信成功**。
 3. 写时序
+    1. 开始信号
+    2. 主机发送要写的I2C设备地址，8位数据，其中高7位位设备地址
+    3. 最后一位是读写位，1读，0写
+    4. 从机发送ACK应答信号
+    5. 主机重新发送开始信号
+    6. 主机发送要写入数据的寄存器地址
+    7. 从机发送ACK信号
+    8. 主机发送要写入寄存器的数据
+    9. 从机发送ACK信号
+    10. 停止信号
+4. 读时序
+    1. 开始信号
+    2. 主机发送要读的I2C设备地址
+    3. 读写控制位，写信号
+    4. 从机发送ACK应答信号
+    5. 重新发送开始信号
+    6. 主机发送要读取的寄存器地址
+    7. 从机发送ACK应答信号
+    8. 重新发送开始信号
+    9. 重新发送要读取的I2C设备地址
+    10. 读写控制位，读信号
+    11. 从机发送ACK应答信号
+    12. 从I2C器件里读到的数据
+    13. 主机发出NO ACK信号，表示读取完成，不需要从机再发送ACK信号
+    14. 主机发出STOP信号，停止I2C通信
 #### I2C子系统总体框架
 1. 裸机I2C驱动
     - I2C主机驱动：SoC的I2C控制器对应的驱动程序，一旦编写完成就不需要再做修改，其他I2C设备直接调用主机驱动提供的API函数完成读写操作即可。
     - I2C设备驱动：挂在I2C总线下的具体设备对应的驱动程序
+2. Linux使用I2C总线框架，主要分为三大部分：
+    1. I2C核心
+        提供I2C总线驱动(适配器)和设备驱动的注册、注销方法，I2C通信方法(algorithm)与具体硬件无关的代码，以及探测设备地址的上层代码
+    2. I2C总线驱动
+        I2C适配器的软件实现，提供I2C适配器与设备间完成数据通信的能力。由i2c_adapter和i2c_algorithm来描述
+    3. I2C设备驱动
+        包含设备注册和驱动注册
+        重点关注两个数据结构：
+        - i2c_client：描述I2C总线下的设备
+        - **i2c_driver**：描述I2C总线下的设备驱动
+3. 驱动编写流程
+    1. 在设备树中创建相应节点
+        使用I2C器件AP3216C三合一环境传感器，挂在**I2C5总线接口**上，所以必须在**i2c5节点**下创建字节点来描述PA3216C设备
+        ```C
+        &i2c5 {
+            pinctrl-names = "default", "sleep";
+            pinctrl-0 = <&i2c5_pins_a>;
+            pinctrl-1 = <&i2c5_pins_sleep_a>;
+            status = "okay";
+
+            ap3216c@1e {
+            compatible = "alientek,ap3216c";
+            reg = <0x1e>;
+            };
+        }；
+        ```
+        `ap3216c`是子节点名字，@后的`1e`是ap3216c的I2C器件地址，设置`compatible属性`是"alientek,ap3216c"，`reg属性`设置ap321c 的器件地址
+    2. i2c设备数据收发流程处理
+        I2C设备驱动首先要**初始化i2c_driver**并向**Linux内核注册**。设备和驱动匹配后i2c_driver里的**probe函数**会执行，里面是字符设备驱动。一般需要在probe函数里初**始化I2C设备**，需要对I2C设备寄存器进行读写，**i2c_msg结构体**来描述一个消息，使用**i2c_transfer**函数发送数据。最终调用**i2c_algorithm**里面的**master_xfer函数**.
+4. 程序编写
+   1. 修改设备树
+      1. `stm32mp15-pinctrl.dtsi`，AP3216C使用了I2C5接口。I2C5使用IO为PA11和PA12，需要根据数据手册设置I2C5的pinmux配置。如果要使用AP3216C的中断功能还需要初始化AP_INT对应的PE4这个IO。
+      2. `stm32mp157d-atk.dts`，在i2c5节点追加ap321c6子节点，修改完成后使用`make dtbs`，然后使用新的设备树启动Linux内核，如果修改正确会在/sys/bus/i2c/deveices目录下看到一个名为`0-001e`的子目录
+   2. AP3216C驱动编写 
+      1. ap3216creg.h 
+        寄存器宏定义
+      2. ap3216c.c
+    - 定义设备结构体
+    ```C
+    struct ap3216c_dev {
+        struct i2c_client *client; /* i2c 设备 */
+        dev_t devid; /* 设备号 */
+        struct cdev cdev; /* cdev */
+        struct class *class; /* 类 */
+        struct device *device; /* 设备 */
+        struct device_node *nd; /* 设备节点 */
+        unsigned short ir, als, ps; /* 三个光传感器数据 */
+    };
+    ```
+    - 从多个寄存器读数据
+    ```C
+    static int ap3216c_read_regs(struct ap3216c_dev *dev, u8 reg, void *val, int len)
+    {
+        int ret;
+        struct i2c_msg msg[2];
+        struct i2c_client *client = (struct i2c_client *)dev->client;
+        
+        /* msg[0]为发送要读取的首地址 */
+        msg[0].addr = client->addr; /* ap3216c 地址 */
+        msg[0].flags = 0; /* 标记为发送数据 */
+        msg[0].buf = &reg; /* 读取的首地址 */
+        msg[0].len = 1; /* reg 长度 */
+
+        /* msg[1]读取数据 */
+        msg[1].addr = client->addr; /* ap3216c 地址 */
+        msg[1].flags = I2C_M_RD; /* 标记为读取数据 */
+        msg[1].buf = val; /* 读取数据缓冲区 */
+        msg[1].len = len; /* 要读取的数据长度 */
+
+        ret = i2c_transfer(client->adapter, msg, 2);
+        if(ret == 2) {
+            ret = 0;
+        } else{
+            printk("i2c rd failed=%d reg=%06x len=%d\n",ret, reg, len);
+            ret = -EREMOTEIO;
+        }
+        return ret;
+    }
+    ```
+    - 向多个寄存器写数据
+    ```C
+    static s32 ap3216c_write_regs(struct ap3216c_dev *dev, u8 reg, u8 *buf, u8 len)
+    {
+        u8 b[256];
+        struct i2c_msg msg;
+        struct i2c_client *client = (struct i2c_client *)dev->client;
+       
+        b[0] = reg; /* 寄存器首地址 */
+        memcpy(&b[1],buf,len); /* 将要写入的数据拷贝到数组 b 里面 */
+
+        msg.addr = client->addr; /* ap3216c 地址 */
+        msg.flags = 0; /* 标记为写数据 */
+
+        msg.buf = b; /* 要写入的数据缓冲区 */
+        msg.len = len + 1; /* 要写入的数据长度 */
+
+        return i2c_transfer(client->adapter, &msg, 1);
+    }
+    ```
+    - 指定寄存器读数据
+    ```C
+    static unsigned char ap3216c_read_reg(struct ap3216c_dev *dev, u8 reg)
+    {
+        u8 data = 0;
+        
+        ap3216c_read_regs(dev, reg, &data, 1);
+        return data;
+    }
+    ```
+    - 指定寄存器写数据
+    ```C
+    static void ap3216c_write_reg(struct ap3216c_dev *dev, u8 reg, u8 data)
+    {
+        u8 buf = 0;
+        buf = data;
+        ap3216c_write_regs(dev, reg, &buf, 1);
+    }
+    ```
+    - 读取AP3216C数据
+    ```C
+    void ap3216c_readdata(struct ap3216c_dev *dev)
+    {
+        unsigned char i =0;
+        unsigned char buf[6];
+
+        /* 循环读取所有传感器数据 */
+        for(i = 0; i < 6; i++) {
+            buf[i] = ap3216c_read_reg(dev, AP3216C_IRDATALOW + i);
+        }
+
+        if(buf[0] & 0X80) /* IR_OF 位为 1,则数据无效 */
+            dev->ir = 0;
+        else
+            dev->ir = ((unsigned short)buf[1] << 2) | (buf[0] & 0X03)
+        
+        dev->als = ((unsigned short)buf[3] << 8) | buf[2];
+
+        if(buf[4] & 0x40) /* IR_OF 位为 1,则数据无效 */
+            dev->ps = 0;
+        else /* 读取 PS 传感器的数据 */
+            dev->ps = ((unsigned short)(buf[5] & 0X3F) << 4) | (buf[4] &);
+    }
+    ```
+    - 打开设备
+    ```C
+    static int ap3216c_open(struct inode *inode, struct file *filp)
+    {
+        /* 从 file 结构体获取 cdev 指针， 再根据 cdev 获取 ap3216c_dev 首地址 */
+        struct cdev *cdev = filp->f_path.dentry->d_inode->i_cdev;
+        struct ap3216c_dev *ap3216cdev = container_of(cdev, struct ap3216c_dev, cdev);
+
+        /* 初始化 AP3216C */
+        ap3216c_write_reg(ap3216cdev, AP3216C_SYSTEMCONG, 0x04);
+        mdelay(50);
+        ap3216c_write_reg(ap3216cdev, AP3216C_SYSTEMCONG, 0X03)
+        return 0;
+    }
+    ```
+    - 从设备中读取数据
+    ```C
+    static ssize_t ap3216c_read(struct file *filp, char __user *buf, size_t cnt, loff_t *off)
+    {
+        short data[3];
+        long err = 0;
+        
+        struct cdev *cdev = filp->f_path.dentry->d_inode->i_cdev;
+        struct ap3216c_dev *dev = container_of(cdev, struct ap3216c_dev, cdev);
+
+        ap3216c_readdata(dev);
+
+        data[0] = dev->ir;
+        data[1] = dev->als;
+        data[2] = dev->ps;
+        err = copy_to_user(buf, data, sizeof(data));
+        return 0;
+    }
+    ```
+    - 关闭设备
+    ```C
+    static int ap3216c_release(struct inode *inode, struct file *filp)
+    {
+        return 0;
+    }
+    ```
+    - AP3216C操作函数
+    ```C
+    static const struct file_operations ap3216c_ops = {
+        .owner = THIS_MODULE,
+        .open = ap3216c_open,
+        .read = ap3216c_read,
+        .release = ap3216c_release,
+    };
+    ```
+    - i2c驱动的probe函数
+    ```C
+    static int ap3216c_probe(struct i2c_client *client, const struct i2c_device_id *id)
+    {
+        int ret;
+        struct ap3216c_dev *ap3216cdev;
+
+        ap3216cdev = devm_kzalloc(&client->dev, sizeof(*ap3216cdev), GFP_KERNEL);
+
+        if(!ap3216cdev)
+            return -ENOMEM;
+        
+        /* 注册字符设备驱动 */
+        /* 1、创建设备号 */
+        ret = alloc_chrdev_region(&ap3216cdev->devid, 0, AP3216C_CNT, AP3216C_NAME);
+
+        if(ret < 0) {
+            pr_err("%s Couldn't alloc_chrdev_region, ret=%d\r\n", AP3216C_NAME, ret);
+            return -ENOMEM;
+        }
+
+        /* 2、初始化 cdev */
+        ap3216cdev->cdev.owner = THIS_MODULE;
+        cdev_init(&ap3216cdev->cdev, &ap3216c_ops);
+
+        /* 3、添加一个 cdev */
+        ret = cdev_add(&ap3216cdev->cdev, ap3216cdev->devid, AP3216C_CNT);
+
+        if(ret < 0) {
+            goto del_unregister;
+        }
+
+        /* 4、创建类 */
+        ap3216cdev->class = class_create(THIS_MODULE, AP3216C_NAME);
+        if (IS_ERR(ap3216cdev->class)) {
+            goto del_cdev;
+        }
+
+        /* 5、创建设备 */
+        ap3216cdev->device = device_create(ap3216cdev->class, NULL, ap3216cdev->devid, NULL, AP3216C_NAME);
+
+        if (IS_ERR(ap3216cdev->device)) {
+            goto destroy_class;
+        }
+        ap3216cdev->client = client;
+        /* 保存 ap3216cdev 结构体 */
+        i2c_set_clientdata(client, ap3216cdev);
+
+        return 0;
+    destroy_class:
+        device_destroy(ap3216cdev->class, ap3216cdev->devid);
+    del_cdev:
+        cdev_del(&ap3216cdev->cdev);
+    del_unregister:
+        unregister_chrdev_region(ap3216cdev->devid, AP3216C_CNT);
+        return -EIO;
+    }
+    ```
+    - remove函数
+    ```C
+    static int ap3216c_remove(struct i2c_client *client)
+    {
+        struct ap3216c_dev *ap3216cdev = i2c_get_clientdata(client);
+        /* 注销字符设备驱动 */
+        /* 1、删除 cdev */
+        cdev_del(&ap3216cdev->cdev);
+        /* 2、注销设备号 */
+        unregister_chrdev_region(ap3216cdev->devid, AP3216C_CNT);
+        /* 3、注销设备 */
+        device_destroy(ap3216cdev->class, ap3216cdev->devid);
+        /* 4、注销类 */
+        class_destroy(ap3216cdev->class);
+        return 0;
+    }
+    ```
+    - 传统匹配方式ID列表
+    ```C
+    static const struct i2c_device_id ap3216c_id[] = {
+        {"alientek,ap3216c", 0},
+        {}
+    };
+    ```
+    - 设备树匹配列表
+    ```C
+    static const struct of_device_id ap3216c_of_match[] = {
+        { .compatible = "alientek,ap3216c" },
+        { /* Sentinel */ }
+    };
+    ```
+    - i2c驱动结构体
+    ```C
+    static struct i2c_driver ap3216c_driver = {
+        .probe = ap3216c_probe,
+        .remove = ap3216c_remove,
+        .driver = {
+            .owner = THIS_MODULE,
+            .name = "ap3216c",
+            .of_match_table = ap3216c_of_match,
+        },
+        .id_table = ap3216c_id,
+    };
+    ```
+    - i2c驱动入口函数
+    ```C
+    static int __init ap3216c_init(void)
+    {
+        int ret = 0;
+        ret = i2c_add_driver(&ap3216c_driver);
+        return ret;
+    };
+    ```
+    - i2c驱动出口函数
+    ```C
+    static int __init ap3216c_init(void)
+    {
+        i2c_del_driver(&ap3216c_driver);
+    };
+    ```
+    - 模块信息
+    module_init(ap3216c_init);
+    module_exit(ap3216c_exit);
+    MODULE_LICENSE("GPL");
+    MODULE_AUTHOR("ALIENTEK");
+    MODULE_INFO(intree, "Y");
 ### 10、Linux SPI
-2. Linux
-    使用I2C总线框架，主要分为
-    - I2C核心
-    - I2C总线驱动
-    - I2C设备驱动
+#### 基本原理 
+1. SPI简介
+    串行，高速，全双工，同步通信总线
+    一般需要4根通信线(单向传输使用3根)：
+    - CS/SS：片选信号线，通过拉低片信号选择相应从机
+    - SCK：串行时钟
+    - MOSI/SDO：主出从入信号线
+    - MISO/SDI：主入从出信号线
+2、四种工作模式：
+    时钟极性：
+    - CPOL = 0，串行时钟空间状态为低电平。
+    - CPOL = 1，串行时钟空闲状态为高电平
+    时钟相位
+    - CPHA = 0，串行时钟第一个跳变沿采集数据
+    - CPHA = 1，串行时钟第二个跳变沿采集数据
+#### 总体框架
+1. 总线框架
+    - SPI核心层
+    - SPI控制器驱动层
+    - SPI设备驱动层
+2. 设备驱动匹配
+    由SPI总线`spi_bus_type`来完成，匹配函数为`spi_match_device`
+3. 驱动编写流程
+    - IO的pinctrl子节点创建和修改(检查有没有被使用)
+    - SPI设备节点的创建与修改
+    - 数据收发处理流程：
+        1. 申请并**初始化 spi_transfer**，设置spi_transfer的tx_buf成员变量，tx_buf为要发送的数
+据。然后设置rx_buf成员变量，rx_buf保存着接收到的数据。最后设置len 成员变量，也就是要进行数据通信的长度
+        2. 使用 spi_message_init函数**初始化 spi_message**
+        3. 使用spi_message_add_tail函数将前面设置好的**spi_transfer添加到spi_message队列中**
+        4. 使用spi_sync函数完成SPI 数据同步传输
+1. 程序编写
+    1. 设备结构体创建
+    2. spi_driver注册和注销
+    ```C
+    //传统ID列表
+    //设备树匹配列表
+    //SPI驱动结构体
+    对.probe .remobe .driver .id_table进行赋值
+    //驱动入口函数
+    spi_register_driver
+    //驱动出口函数
+    spi_unregister_driver
+    //模块信息
+    ```
+    3. probe和remove函数
+    **probe**
+    ```C
+    //创建设备结构体对象
+    //分配对象空间
+    //注册设备字符驱动
+        //创建设备号
+        //初始化cdev
+        //添加cdev
+        //创建类
+        //创建设备
+        //初始化spi_device
+        配置spi模式
+    ```
+    **remove**
+    ```C
+    //获取驱动数据
+    //注销字符设备驱动
+        //删除cdev
+        //注销设备号
+        //注销设备
+        //注销类
+    ```
+    4. 寄存器读写和初始化
+    ```C
+    //读取多个寄存器数据
+    //向多个寄存器写数据
+    //读取一个寄存器
+    //写入一个寄存器
+    //读取ICM20608设备原始数据
+    //内部寄存器初始化
+        通过寄存器写入数据
+    ```
+    5. 字符驱动框架
+    ```C
+    //open
+    //read
+    //release
+    //操作函数
+    ```
 ### 11、Linux UART
+#### UART驱动框架
+1. 设备结构体创建
+2. spi_driver注册和注销
+3. 匹配成功后执行probe函数，重点是初始化uart_port，然后添加到对应的uart_driver中
+   - **stm32_usart_of_get_port**函数，它主要是负责配置 stm32_ports 数组
+   - **stm32_usart_init_port**函数，它主要是负责获取 SOC UART 外设首地址、中断号、注册中断函数同时还设置 uart_ops 为 stm32_uart_ops(STM32MP1最底层驱动哈数集合)
+   - **uart_add_one_port**向 uart_driver 添加 uart_port
+4. stm32_uart_ops 中的函数基本都是和 STM32MP1 的 UART 寄存器打交道
 ### 12、Linux CAN
 ### 13、Linux WiFi
